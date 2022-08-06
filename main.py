@@ -10,11 +10,11 @@ def computeRootSIFTDescriptors(descriptor):
 
 
 def findKeypoints(image, mask=None, N=15):
-    # fast = cv2.FastFeatureDetector_create(40)
-    # kp = fast.detect(image, mask)
+    fast = cv2.FastFeatureDetector_create(40)
+    kp = fast.detect(image, mask)
     sift = cv2.SIFT_create(N)
-    # kp, des = sift.compute(image,kp )
-    kp, des = sift.detectAndCompute(image,mask)
+    kp, des = sift.compute(image,kp )
+    # kp, des = sift.detectAndCompute(image,mask)
     des = computeRootSIFTDescriptors(des)
     return kp, des
 
@@ -191,14 +191,12 @@ def ellipse(x,y,x0,y0,alpha,sx,sy):
     return ((np.cos(alpha)*(x-x0) - np.sin(alpha)*(y-y0))/sx)**2 + ((np.sin(alpha)*(x-x0) + np.cos(alpha)*(y-y0))/sy)**2 
 
 def getSearchMask(X, P, K, h, w, R):
-    xc, idx = measurementModel(X,P,K,h,w)
+    xc, _ = measurementModel(X,P,K,h,w)
     N = xc.shape[1]
     H = np.vstack([dh(X,i,K) for i in range(N)])
     Sigma = H@P@H.T + np.kron(np.eye(N), R)
     mask = np.zeros([h,w, 3],dtype= np.uint8)
     ellipses = []
-    x = np.arange(0,w)
-    y = np.arange(0,h)[:,None]
     for j in range(N):
         p = Sigma[2*j:2+2*j, 2*j:2+2*j]
         [e, v] = np.linalg.eig(p)
@@ -208,8 +206,6 @@ def getSearchMask(X, P, K, h, w, R):
         y0 = xc[1,j]
 
         ellipses.append({'x0': x0, 'y0': y0, 'alpha': alpha, 'sx': e[0], 'sy': e[1]})
-        # ellipse = ((x-x0)/e[0])**2 + ((y-y0)/e[1])**2 <= 1
-        # mask = np.logical_or(mask, ellipse(x,y,x0,y0,alpha,e[0],e[1]) < 0.01)
         cv2.ellipse(mask, [int(x0), int(y0)], [int(e[0]/10), int(e[1]/10)], alpha, 0, 360, (255, 0, 0),-1)
     # mask = mask.astype(np.uint8)*255
     # cv2.imshow( "Frame", cv2.resize(np.hstack([mask,mask]), (w,h//2)))
@@ -245,7 +241,7 @@ def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, K: np.ndarray, R):
 
 
 if __name__ == "__main__":
-    filename = r"C:\Users\erling\Pictures\Camera Roll\test.mp4"
+    filename = r"C:\Users\erling\Pictures\Camera Roll\test4.mp4"
     cap = cv2.VideoCapture(filename)
     # Read until video is completed
     ret, baseFrame = cap.read()
@@ -281,11 +277,9 @@ if __name__ == "__main__":
     while(cap.isOpened()):
         ret, frame = cap.read()
         if ret == True:
-
             X, P = priorUpdate(X, P, Q, 1/30)
             print(X[:3])
             mask, ellipses = getSearchMask(X,P,K,h,w, R_noise)
-
 
             kps, des =  findKeypoints(frame, mask)
             matchMask = np.array([[ellipse(kps[i].pt[0], kps[i].pt[1], **ellipses[j]) <= 0.01 for j in range(N)] for i in range(len(kps))], dtype=np.uint8)
