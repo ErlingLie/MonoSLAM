@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
+from scipy.linalg import block_diag
 
 
 def computeRootSIFTDescriptors(descriptor):
@@ -10,11 +11,19 @@ def computeRootSIFTDescriptors(descriptor):
 
 
 def findKeypoints(image, mask=None, N=15):
-    fast = cv2.FastFeatureDetector_create(40)
-    kp = fast.detect(image, mask)
+    # fast = cv2.FastFeatureDetector_create(40)
+    # try:
+    #     kp = fast.detect(image, mask)
+    #     sift = cv2.SIFT_create(N)
+    #     kp, des = sift.compute(image,kp )
+    #     des = computeRootSIFTDescriptors(des)
+    # except:
+    #     kp = fast.detect(image, None)
+    #     sift = cv2.SIFT_create(N)
+    #     kp, des = sift.compute(image,kp )
+    #     des = computeRootSIFTDescriptors(des)
     sift = cv2.SIFT_create(N)
-    kp, des = sift.compute(image,kp )
-    # kp, des = sift.detectAndCompute(image,mask)
+    kp, des = sift.detectAndCompute(image,mask)
     des = computeRootSIFTDescriptors(des)
     return kp, des
 
@@ -74,7 +83,6 @@ def leftQuaternionMatrix(q):
         [q[3], -q[2], q[1], q[0]]
     ])
 
-
 def dqdphi(phi: np.ndarray):
     if not phi.any():
         return np.vstack([[0,0,0], np.eye(3)])
@@ -83,6 +91,14 @@ def dqdphi(phi: np.ndarray):
     dq = np.sin(phinorm/2)*1/phinorm*np.eye(3) + \
         (1/2*np.cos(phinorm/2)/phinorm - np.sin(phinorm/2)/phinorm**2)/phinorm*phi.reshape([1,3])@phi.reshape([3,1])
     return np.block([[dq0],[dq]])
+
+
+def skewSymmetric(w):
+    return np.array([
+        [0, -w[2], w[1]],
+        [w[2], 0, -w[0]],
+        [-w[1], w[0], 0]
+        ])
 
 def priorUpdate(X: np.ndarray,P:np.ndarray, Q: np.ndarray, dt):
     r = X[0:3]
@@ -105,24 +121,24 @@ def priorUpdate(X: np.ndarray,P:np.ndarray, Q: np.ndarray, dt):
     dq_quat[0] = dq_quat_t[3]
     dq_quat[1:] = dq_quat_t[:3]
 
-    dr = np.block([[np.eye(3), np.zeros((3,4)), np.eye(3)*dt, np.zeros((3,3))]])
-    dq = np.block([[np.zeros((4,3)), rightQuaternionMatrix(dq_quat),
-             np.zeros((4,3)), leftQuaternionMatrix(q)@dqdphi(w*dt)*dt]])
-    dv = np.block([[np.zeros((3,7)), np.eye(3), np.zeros((3,3))]])
-    dw = np.block([[np.zeros((3,10)), np.eye(3)]])
+    dr = np.block([[np.eye(3), np.zeros((3,3)), np.eye(3)*dt, np.zeros((3,3))]])
+    dtheta = np.block([[np.zeros((3,3)), np.eye(3)-dt*skewSymmetric(w),
+             np.zeros((3,3)), dt*np.eye(3)]])
+    dv = np.block([[np.zeros((3,6)), np.eye(3), np.zeros((3,3))]])
+    dw = np.block([[np.zeros((3,9)), np.eye(3)]])
 
 
-    Fx = np.vstack([dr,dq,dv,dw])
+    Fx = np.vstack([dr,dtheta,dv,dw])
 
     dru = np.block([[np.eye(3)*dt, np.zeros((3,3))]])
-    dqu = np.block([[np.zeros((4,3)), leftQuaternionMatrix(q)@dqdphi(w*dt)*dt]])
+    dthetau = np.block([[np.zeros((3,3)), np.eye(3)*dt]])
     dvu = np.block([[np.eye(3), np.zeros((3,3))]])
     dwu = np.block([[np.zeros((3,3)), np.eye(3)]])
 
-    Fu = np.vstack([dru, dqu, dvu, dwu])
-    P1 = P[:13,:13]
+    Fu = np.vstack([dru, dthetau, dvu, dwu])
+    P1 = P[:12,:12]
     Pp = Fx@P1@Fx.T + Fu@Q@Fu.T
-    P[:13,:13] = Pp
+    P[:12,:12] = Pp
     X[0:3] = rp
     X[3:7] = qp
     return X, P
@@ -180,10 +196,14 @@ def dh(X, idx, K):
 
     dh_dq = dh_dX_C@K@diffQuatRot(np.array([q[0],-q[1], -q[2], -q[3]]),m-x)@np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,-1]])
 
-    H = np.zeros([2,X.shape[0]])
-    H[:,:3] = dh_dX_C@dx
-    H[:,3:7] = dh_dq
-    H[:,13+3*idx:16+3*idx] = dh_dX_C@dm
+    Hx = np.zeros([2,X.shape[0]])
+    Hx[:,:3] = dh_dX_C@dx
+    Hx[:,3:7] = dh_dq
+    Hx[:,13+3*idx:16+3*idx] = dh_dX_C@dm
+
+    Q_dtheta = 1/2*np.vstack([-q[None,1:],q[0]*np.eye(3)+skewSymmetric(q[1:])])
+    X_dx = block_diag(np.eye(3), Q_dtheta, np.eye(6), np.eye(X.shape[0]-13) )
+    H = Hx@X_dx
     return H
 
 
@@ -204,12 +224,14 @@ def getSearchMask(X, P, K, h, w, R):
 
         x0 = xc[0,j]
         y0 = xc[1,j]
-
-        ellipses.append({'x0': x0, 'y0': y0, 'alpha': alpha, 'sx': e[0], 'sy': e[1]})
-        cv2.ellipse(mask, [int(x0), int(y0)], [int(e[0]/10), int(e[1]/10)], alpha, 0, 360, (255, 0, 0),-1)
+        try:
+            ellipses.append({'x0': x0, 'y0': y0, 'alpha': alpha, 'sx': e[0], 'sy': e[1]})
+            cv2.ellipse(mask, [int(x0), int(y0)], [int(e[0]/10), int(e[1]/10)], alpha, 0, 360, (255, 0, 0),-1)
+        except:
+            mask[:] = 1
     # mask = mask.astype(np.uint8)*255
     # cv2.imshow( "Frame", cv2.resize(np.hstack([mask,mask]), (w,h//2)))
-    # cv2.waitKey(1)
+    # cv2.waitKey(0)
     return mask[:,:,0], ellipses
         
 
@@ -220,7 +242,12 @@ def drawEllipses(image, ellipses):
         sx = ellipse['sx']
         sy = ellipse['sy']
         alpha = ellipse['alpha']
-        cv2.ellipse(image, [int(x0), int(y0)], [int(sx/10), int(sy/10)], alpha, 0, 360, (0, 0, 255),3)
+        # print("Center", [int(x0), int(y0)])
+        # print("Error:", [int(sx/10), int(sy/10)])
+        try:
+            cv2.ellipse(image, [int(x0), int(y0)], [int(sx/10), int(sy/10)], alpha, 0, 360, (0, 0, 255),3)
+        except:
+            pass
 
 def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, K: np.ndarray, R):
     z_est = measurementModel(X,P,K)[0][:, idx].T
@@ -233,15 +260,26 @@ def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, K: np.ndarray, R):
 
     Sigma_IN = H@P@H.T + np.kron(np.eye(len(idx)),R)
     K_kalman = P@H.T@np.linalg.inv(Sigma_IN)
-    X = X.reshape(-1,1) + K_kalman@dz.reshape(-1,1)
+    dx = K_kalman@dz.reshape(-1,1)
     M = (np.eye(P.shape[0])-K_kalman@H)
     P = M@P@M.T + K_kalman@np.kron(np.eye(len(idx)),R)@K_kalman.T
+    
+    dx = dx.squeeze()
+    X[0:3] += dx[0:3]
+    qm = (Rot.from_quat([X[4], X[5], X[6], X[3]])*Rot.from_rotvec(dx[3:6])).as_quat()
+    X[4:7] = qm[0:3]
+    X[3] = qm[3]
+    X[7:] += dx[6:]
+
+    # Covariance reset
+    G = np.eye(3)-skewSymmetric(dx[3:6]/2)
+    P[3:6, 3:6] = G@P[3:6,3:6]@G.T 
     return X.squeeze(), P
 
 
 
 if __name__ == "__main__":
-    filename = r"C:\Users\erling\Pictures\Camera Roll\test4.mp4"
+    filename = r"C:\Users\erling\Pictures\Camera Roll\test.mp4"
     cap = cv2.VideoCapture(filename)
     # Read until video is completed
     ret, baseFrame = cap.read()
@@ -264,8 +302,10 @@ if __name__ == "__main__":
     for i in range(N):
         X[13+3*i:16+3*i] = M[:3,i].squeeze()
     
-    P = np.eye(X.shape[0])*1e-8
-    # P[7:,7:]*= 1000
+
+    # P is now one dimension smaller as we represent the orientation error in 3 dimensions
+    P = np.eye(X.shape[0]-1)*1e-8
+    # P[6:,6:]*= 1000
 
     mask1 = np.full([h,w],255,np.uint8)
     print(N)
@@ -296,7 +336,7 @@ if __name__ == "__main__":
 
             cv2.imshow( "Frame", cv2.resize(image,(w,h//2)) )
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(25) & 0xFF == ord('q'):
                 break
         else:
             break
