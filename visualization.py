@@ -1,26 +1,6 @@
 from matplotlib import pyplot as plt
 import numpy as np
-
-def rotate_x(radians):
-    c = np.cos(radians)
-    s = np.sin(radians)
-    return np.array([[1, 0, 0],
-                     [0, c,-s],
-                     [0, s, c]])
-
-def rotate_y(radians):
-    c = np.cos(radians)
-    s = np.sin(radians)
-    return np.array([[ c, 0, s],
-                     [ 0, 1, 0],
-                     [-s, 0, c]])
-
-def rotate_z(radians):
-    c = np.cos(radians)
-    s = np.sin(radians)
-    return np.array([[c,-s, 0],
-                     [s, c, 0],
-                     [0, 0, 1]])
+from scipy.spatial.transform import Rotation as Rot
 
 def project(K, X):
     uvw = K@X[:3,:]
@@ -33,15 +13,15 @@ def project_camera_frame(K, T, scale):
     Draw the axes of T and a pyramid, representing the camera.
     """
     s = scale
-    X = []
-    X.append(np.array([0,0,0,1]))
-    X.append(np.array([-s,-s,1.5*s,1]))
-    X.append(np.array([+s,-s,1.5*s,1]))
-    X.append(np.array([+s,+s,1.5*s,1]))
-    X.append(np.array([-s,+s,1.5*s,1]))
-    X.append(np.array([5.0*s,0,0,1]))
-    X.append(np.array([0,5.0*s,0,1]))
-    X.append(np.array([0,0,5.0*s,1]))
+    X = np.array([[0,0,0,1],
+                [-s,-s,1.5*s,1],
+                [+s,-s,1.5*s,1],
+                [+s,+s,1.5*s,1],
+                [-s,+s,1.5*s,1],
+                [5.0*s,0,0,1],
+                [0,5.0*s,0,1],
+                [0,0,5.0*s,1]])
+
     X = np.array(X).T
     u,v = project(K, T@X)
     lines = [(0,1), (0,2), (0,3), (0,4), (1,2), (2,3), (3,4), (4,1)]
@@ -68,8 +48,8 @@ def draw_model_and_query_pose(X, T_m2q, K,
               c: Color associated with each point in X [shape Nx3].
     """
 
-    assert X.ndim == 2, 'X must be a (3 or 4)xN array'
-    assert X.shape[1] > 0, 'X must have at least one point'
+    # assert X.ndim == 2, 'X must be a (3 or 4)xN array'
+    # assert X.shape[1] > 0, 'X must have at least one point'
 
     X = X.copy()
     if X.shape[0] == 3:
@@ -117,8 +97,24 @@ def draw_model_and_query_pose(X, T_m2q, K,
         T_inv = np.linalg.inv(T)
         project_camera_frame(K, T_m2f@T_inv, scale=frame_size)
 
+
     plt.axis('image')
 
     # Arbitrarily set axis limits to 2*principal point
     plt.xlim([0.0, K[0,2]*2])
     plt.ylim([K[1,2]*2, 0.0])
+
+
+
+def get3dImage(X, K, canvas, fig):
+    rot = Rot.from_quat([X[4],X[5],X[6],X[3]]).inv()
+    lookat = rot.apply(-X[:3]+np.array([0,0,10]))
+    lookfrom = rot.apply(-X[:3]-np.array([0,0,10]))
+    draw_model_and_query_pose(X[13:].reshape(-1,3).T,\
+        np.block([[Rot.from_quat([X[4],X[5],X[6],X[3]]).as_matrix(),\
+                X[:3,None]], [0,0,0,1]]), K,
+                lookat=lookat, lookfrom = lookfrom, point_size=30,)
+    canvas.draw() 
+    width, height = (fig.get_size_inches() * fig.get_dpi()).astype(int)
+    img = np.frombuffer(canvas.tostring_rgb(), dtype='uint8').reshape(height, width, 3) 
+    return img

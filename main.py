@@ -2,10 +2,14 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 from scipy.linalg import block_diag
-from visualization import draw_model_and_query_pose
+from visualization import draw_model_and_query_pose, get3dImage
 import matplotlib.animation as animation
 from matplotlib import pyplot as plt
 
+from cProfile import Profile
+from pstats import Stats
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 def computeRootSIFTDescriptors(descriptor):
     descriptor /= np.linalg.norm(descriptor, ord=1, axis=1, keepdims=True)
@@ -43,7 +47,7 @@ def match2d(kp1, des1, kp2, des2, N):
 def triangulate_points(frame1, frame2, K):
     kp, des = findKeypoints(frame1, None, 3000)
     kp2, des2 = findKeypoints(frame2, None, 3000)
-    matches, descriptors, good = match2d(kp,des, kp2, des2, 30)
+    matches, descriptors, good = match2d(kp,des, kp2, des2, 10)
     uv1 = matches[:,:2]
     uv2 = matches[:,2:4]
     kp = [kp[m.queryIdx] for m in good]
@@ -51,7 +55,6 @@ def triangulate_points(frame1, frame2, K):
     num_innliers, R, t, mask, X = cv2.recoverPose(E, uv1, uv2, K, distanceThresh=50)
     X = X[:,innliers.squeeze().astype(bool)]
     X/=X[-1,]
-    X*=-1
     return X, kp, descriptors[innliers.squeeze().astype(bool), :], R, -t
 
 
@@ -306,6 +309,13 @@ if __name__ == "__main__":
     image = np.zeros([h,2*w,3])
 
     frames = []
+
+    pr = Profile()
+    pr.enable()
+    fig = plt.figure(dpi=200)
+    canvas = FigureCanvas(fig)
+    
+
     while(cap.isOpened()):
         ret, frame = cap.read()
         if ret == True:
@@ -329,30 +339,39 @@ if __name__ == "__main__":
             z = np.array([kps[m.queryIdx].pt for m in bestMatches])
             X, P = measurementUpdate(z, idx,X, P, K, R_noise)
 
-            # frame = cv2.drawKeypoints(frame,kps,frame)
 
             image = cv2.drawMatches(frame,kps,baseFrame,markers,bestMatches, image)
             uncertainties = drawEllipses(image, ellipses)
-            cv2.imshow( "Frame", cv2.resize(image,(w,h//2)) )
+
+
+            img = get3dImage(X,K,canvas, fig)
+            image = np.vstack([image, np.hstack([img,\
+                 15*np.ones((img.shape[0], image.shape[1]-img.shape[1],3), dtype=np.uint8)])])
+
+            cv2.imshow( "Frame", image)
+
             frames.append([X[13:].reshape(-1,3).T,\
                 np.block([[Rot.from_quat([X[4],X[5],X[6],X[3]]).as_matrix(),\
                      X[:3,None]], [0,0,0,1]]), K])
-            if cv2.waitKey(25) & 0xFF == ord('q'):
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         else:
             break
     
 
-
     cap.release()
     cv2.destroyAllWindows()
-    fig = plt.figure()
+    stats = Stats(pr)
+    stats.sort_stats('cumtime').print_stats(30)
+    # fig = plt.figure()
 
-    lookfrom = np.array([[0,0,-15]])
-    ani = animation.FuncAnimation(fig, lambda x: draw_model_and_query_pose(*x,\
-         point_size=50,
-         lookfrom=lookfrom, lookat=X[0:3]+Rot.from_quat([X[4],X[5],X[6],X[3]]).apply([0,0,1])*2,
-        #  lookfrom=np.linalg.inv(x[1])[:3,-1]+x[1][2,:3]*10, lookat=np.array([-3.11418413e-02, -1.27069648e+01,  7.78613041e+01]),
-         ), frames, interval = 30)
-    plt.show()
+    # lookfrom = np.array([[0,0,-15]])
+    # print(X[13:].reshape(-1,3))
+    # ani = animation.FuncAnimation(fig, lambda x: draw_model_and_query_pose(*x,\
+    #      point_size=50,
+    #     #  lookfrom=lookfrom, lookat=np.mean(X[13:].reshape(-1,3), 0),
+    #      lookfrom=np.linalg.inv(x[1])[:3,-1]-x[1][2,:3]*10 -x[1][1,:3]*2,
+    #      lookat=np.linalg.inv(x[1])[:3,-1] + x[1][2,:3]*5,
+    #      ), frames, interval = 30)
+    # plt.show()
 
