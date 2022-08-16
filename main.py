@@ -2,6 +2,9 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 from scipy.linalg import block_diag
+from visualization import draw_model_and_query_pose
+import matplotlib.animation as animation
+from matplotlib import pyplot as plt
 
 
 def computeRootSIFTDescriptors(descriptor):
@@ -22,21 +25,26 @@ def findKeypoints(image, mask=None, N=15):
     #     sift = cv2.SIFT_create(N)
     #     kp, des = sift.compute(image,kp )
     #     des = computeRootSIFTDescriptors(des)
-    sift = cv2.SIFT_create(N)
-    kp, des = sift.detectAndCompute(image,mask)
-    des = computeRootSIFTDescriptors(des)
+    # sift = cv2.SIFT_create(N)
+    # kp, des = sift.detectAndCompute(image,mask)
+    # des = computeRootSIFTDescriptors(des)
+
+    orb = cv2.ORB_create()
+    kp, des = orb.detectAndCompute(image, mask)
     return kp, des
 
-def match2d(kp1, des1, kp2, des2):
+def match2d(kp1, des1, kp2, des2, N):
     # BFMatcher with default params
-    bf = cv2.BFMatcher(crossCheck=False)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     matches = bf.knnMatch(des1,des2,k=2)
     # matches = bf.match(des1, des2)
     # Apply ratio test
+    matches = sorted(matches, key = lambda x:x[0].distance)
+
     matchLocations = []
     descriptors = []
     good = []
-    for m, n in matches:
+    for m, n in matches[:N]:
         if m.distance < 0.75*n.distance:
             good.append(m)
             img1Pt = kp1[m.queryIdx].pt
@@ -48,9 +56,9 @@ def match2d(kp1, des1, kp2, des2):
 
 
 def triangulate_points(frame1, frame2, K):
-    kp, des = findKeypoints(frame1, None, 30)
-    kp2, des2 = findKeypoints(frame2, None, 500)
-    matches, descriptors, good = match2d(kp,des, kp2, des2)
+    kp, des = findKeypoints(frame1, None, 3000)
+    kp2, des2 = findKeypoints(frame2, None, 3000)
+    matches, descriptors, good = match2d(kp,des, kp2, des2, 10)
     uv1 = matches[:,:2]
     uv2 = matches[:,2:4]
     kp = [kp[m.queryIdx] for m in good]
@@ -58,7 +66,8 @@ def triangulate_points(frame1, frame2, K):
     num_innliers, R, t, mask, X = cv2.recoverPose(E, uv1, uv2, K, distanceThresh=50)
     X = X[:,innliers.squeeze().astype(bool)]
     X/=X[-1,]
-    return X, kp, descriptors[innliers.squeeze().astype(bool), :], R, t
+    X*=-1
+    return X, kp, descriptors[innliers.squeeze().astype(bool), :], R.T, -R.T@t
 
 
 
@@ -279,13 +288,14 @@ def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, K: np.ndarray, R):
 
 
 if __name__ == "__main__":
-    filename = r"C:\Users\erling\Pictures\Camera Roll\test.mp4"
+    filename = r"C:\Users\erling\Pictures\Camera Roll\test2.mp4"
     cap = cv2.VideoCapture(filename)
     # Read until video is completed
     ret, baseFrame = cap.read()
 
     h = baseFrame.shape[0]
     w = baseFrame.shape[1]
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 20)
     K = np.array([[1000, 0 ,1280/2], [0, 1000, 720/2], [0,0,1]])
     ret, frame2 = cap.read()
     R_noise = 15*np.eye(2)
@@ -310,10 +320,10 @@ if __name__ == "__main__":
     mask1 = np.full([h,w],255,np.uint8)
     print(N)
 
-    bfMatcher = cv2.BFMatcher(crossCheck=False)
+    bfMatcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     image = np.zeros([h,2*w,3])
 
-
+    frames = []
     while(cap.isOpened()):
         ret, frame = cap.read()
         if ret == True:
@@ -324,23 +334,42 @@ if __name__ == "__main__":
             kps, des =  findKeypoints(frame, mask)
             matchMask = np.array([[ellipse(kps[i].pt[0], kps[i].pt[1], **ellipses[j]) <= 0.01 for j in range(N)] for i in range(len(kps))], dtype=np.uint8)
             matches = bfMatcher.match(des, descriptors, matchMask)
+            matches = sorted(matches, key=lambda x: (x.trainIdx, x.distance))
+            i = -1
+            bestMatches = []
+            for m in matches:
+                if m.trainIdx != i:
+                    i = m.trainIdx
+                    bestMatches.append(m)
 
-            idx = np.array([m.trainIdx for m in matches])
-            z = np.array([kps[m.queryIdx].pt for m in matches])
+            idx = np.array([m.trainIdx for m in bestMatches])
+            z = np.array([kps[m.queryIdx].pt for m in bestMatches])
             X, P = measurementUpdate(z, idx,X, P, K, R_noise)
 
             # frame = cv2.drawKeypoints(frame,kps,frame)
 
-            image = cv2.drawMatches(frame,kps,baseFrame,markers,matches, image)
+            image = cv2.drawMatches(frame,kps,baseFrame,markers,bestMatches, image)
             uncertainties = drawEllipses(image, ellipses)
-
             cv2.imshow( "Frame", cv2.resize(image,(w,h//2)) )
-
+            frames.append([X[13:].reshape(-1,3).T,\
+                np.block([[Rot.from_quat([X[4],X[5],X[6],X[3]]).inv().as_matrix(),\
+                     Rot.from_quat([X[4],X[5],X[6],X[3]]).inv().apply(X[:3])[:,None]], [0,0,0,1]]), K])
             if cv2.waitKey(25) & 0xFF == ord('q'):
                 break
         else:
             break
+    
+
 
     cap.release()
     cv2.destroyAllWindows()
+    fig = plt.figure()
+
+    lookfrom = X[0:3]-Rot.from_quat([X[4],X[5],X[6],X[3]]).apply([0,0,1])*10
+    ani = animation.FuncAnimation(fig, lambda x: draw_model_and_query_pose(*x,\
+         point_size=50,
+        #  lookfrom=lookfrom, lookat=X[0:3]+Rot.from_quat([X[4],X[5],X[6],X[3]]).apply([0,0,1])*2,
+         lookfrom=np.linalg.inv(x[1])[:3,-1]+x[1][2,:3]*10+x[1][1,:3]*2, lookat=np.linalg.inv(x[1])[:3,-1]
+         ), frames, interval = 30)
+    plt.show()
 
