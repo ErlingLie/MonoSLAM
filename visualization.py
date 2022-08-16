@@ -106,7 +106,10 @@ def draw_model_and_query_pose(X, T_m2q, K,
 
 
 
-def get3dImage(X, K, canvas, fig):
+def get3dImage(X, canvas, fig):
+    K = np.array([[X[13], 0, X[14]],
+                  [0, X[13], X[15]],
+                  [0, 0, 1]])
     rot = Rot.from_quat([X[4],X[5],X[6],X[3]]).inv()
     lookat = rot.apply(-X[:3]+np.array([0,0,10]))
     lookfrom = rot.apply(-X[:3]-np.array([0,0,10]))

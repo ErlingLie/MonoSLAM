@@ -9,7 +9,6 @@ from matplotlib import pyplot as plt
 from cProfile import Profile
 from pstats import Stats
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from matplotlib.figure import Figure
 
 def computeRootSIFTDescriptors(descriptor):
     descriptor /= np.linalg.norm(descriptor, ord=1, axis=1, keepdims=True)
@@ -47,7 +46,7 @@ def match2d(kp1, des1, kp2, des2, N):
 def triangulate_points(frame1, frame2, K):
     kp, des = findKeypoints(frame1, None, 3000)
     kp2, des2 = findKeypoints(frame2, None, 3000)
-    matches, descriptors, good = match2d(kp,des, kp2, des2, 10)
+    matches, descriptors, good = match2d(kp,des, kp2, des2, 20)
     uv1 = matches[:,:2]
     uv2 = matches[:,2:4]
     kp = [kp[m.queryIdx] for m in good]
@@ -141,10 +140,13 @@ def priorUpdate(X: np.ndarray,P:np.ndarray, Q: np.ndarray, dt):
 
 
 
-def measurementModel(X: np.ndarray, P : np.ndarray, K: np.ndarray, h=512, w=512):
+def measurementModel(X: np.ndarray, h=512, w=512):
     x = X[0:3]
     q = X[3:7]
-    M_W = X[13:].reshape(-1,3)
+    K = np.array([[X[13], 0, X[14]],
+                  [0, X[13], X[15]],
+                  [0, 0, 1]])
+    M_W = X[16:].reshape(-1,3)
     R_WC = Rot.from_quat([q[1],q[2],q[3],q[0]])
     M_C = R_WC.apply(M_W)+x.T
     M_xy = K@M_C.T
@@ -178,26 +180,34 @@ def diffQuatRot(q,r):
     return dq
 
 
-def dh(X, idx, K):
+def dh(X, idx):
     x = X[0:3]
     q = X[3:7]
-    m = X[13+3*idx:16+3*idx]
+    m = X[16+3*idx:19+3*idx]
+    K = np.array([[X[13], 0, X[14]],
+                  [0, X[13], X[15]],
+                  [0, 0, 1]])
     Ml = leftQuaternionMatrix(q)
     Mr = rightQuaternionMatrix(np.hstack([q[0],-q[1:]]))
     M = Ml@Mr
     M = M[1:,1:]
-    dm = K@M
-    dx = K
-    X_C = K@(M@m+x)
-    dh_dX_C = np.array([[1/X_C[2], 0, -X_C[0]/X_C[2]**2],
-                        [0, 1/X_C[2], -X_C[1]/X_C[2]**2]])
+    duvz_dm = K@M
+    duvz_dx = K
 
-    dh_dq = dh_dX_C@K@diffQuatRot(q,m-x)
+    X_C = (M@m+x)
+    uvz = K@X_C
+
+    duvz_dK = np.array([[X_C[0], X_C[2],0],[X_C[1], 0,X_C[2]], [0,0,0]])
+    dh_duvz = np.array([[1/uvz[2], 0, -uvz[0]/uvz[2]**2],
+                        [0, 1/uvz[2], -uvz[1]/uvz[2]**2]])
+
+    dh_dq = dh_duvz@K@diffQuatRot(q,m-x)
 
     Hx = np.zeros([2,X.shape[0]])
-    Hx[:,:3] = dh_dX_C@dx
+    Hx[:,:3] = dh_duvz@duvz_dx
     Hx[:,3:7] = dh_dq
-    Hx[:,13+3*idx:16+3*idx] = dh_dX_C@dm
+    Hx[:,13:16] = dh_duvz@duvz_dK
+    Hx[:,16+3*idx:19+3*idx] = dh_duvz@duvz_dm
 
 
     Q_dtheta = 1/2*np.vstack([-q[None,1:],q[0]*np.eye(3)+skewSymmetric(q[1:])])
@@ -209,10 +219,10 @@ def dh(X, idx, K):
 def ellipse(x,y,x0,y0,alpha,sx,sy):
     return ((np.cos(alpha)*(x-x0) - np.sin(alpha)*(y-y0))/sx)**2 + ((np.sin(alpha)*(x-x0) + np.cos(alpha)*(y-y0))/sy)**2 
 
-def getSearchMask(X, P, K, h, w, R):
-    xc, _ = measurementModel(X,P,K,h,w)
+def getSearchMask(X, P, h, w, R):
+    xc, _ = measurementModel(X,h,w)
     N = xc.shape[1]
-    H = np.vstack([dh(X,i,K) for i in range(N)])
+    H = np.vstack([dh(X,i) for i in range(N)])
     Sigma = H@P@H.T + np.kron(np.eye(N), R)
     mask = np.zeros([h,w, 3],dtype= np.uint8)
     ellipses = []
@@ -243,14 +253,14 @@ def drawEllipses(image, ellipses):
         except:
             pass
 
-def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, K: np.ndarray, R):
-    z_est = measurementModel(X,P,K)[0][:, idx].T
+def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, R):
+    z_est = measurementModel(X)[0][:, idx].T
     dz = z-z_est
     error_meassurements = np.where(np.linalg.norm(dz,2,1)>50)[0]
     idx = np.delete(idx, error_meassurements)
     dz = np.delete(dz, error_meassurements, 0)
 
-    H = np.vstack([dh(X,i,K) for i in idx])
+    H = np.vstack([dh(X,i) for i in idx])
 
     Sigma_IN = H@P@H.T + np.kron(np.eye(len(idx)),R)
     K_kalman = P@H.T@np.linalg.inv(Sigma_IN)
@@ -273,7 +283,7 @@ def measurementUpdate(z, idx, X: np.ndarray, P: np.ndarray, K: np.ndarray, R):
 
 
 if __name__ == "__main__":
-    filename = r"C:\Users\erling\Pictures\Camera Roll\test.mp4"
+    filename = r"C:\Users\erling\Pictures\Camera Roll\test4.mp4"
     cap = cv2.VideoCapture(filename)
     # Read until video is completed
     ret, baseFrame = cap.read()
@@ -289,18 +299,23 @@ if __name__ == "__main__":
     print("FPS:", cap.get(cv2.CAP_PROP_FPS))
     M, markers, descriptors, R, t = triangulate_points(baseFrame, frame2, K)
     N = M.shape[1]
-    X = np.zeros((13+N*3))
+    X = np.zeros((16+N*3))
     q = Rot.from_matrix(R).as_quat()
     X[3] =  1# q[3]
+    X[13] = K[0,0]
+    X[14] = K[0,2]
+    X[15] = K[1,2]
     # X[4:7] = q[:3]
     # X[:3] = t.squeeze()
     for i in range(N):
-        X[13+3*i:16+3*i] = M[:3,i].squeeze()
+        X[16+3*i:19+3*i] = M[:3,i].squeeze()
     
 
     # P is now one dimension smaller as we represent the orientation error in 3 dimensions
     P = np.eye(X.shape[0]-1)*1e-8
-    # P[6:,6:]*= 1000
+
+    P[6:,6:]*= 1000
+    P[13:16,13:16] = np.eye(3)*5
 
     mask1 = np.full([h,w],255,np.uint8)
     print(N)
@@ -322,7 +337,7 @@ if __name__ == "__main__":
             X, P = priorUpdate(X, P, Q, 1/30)
             print(X[:3])
             print(X[13:16])
-            mask, ellipses = getSearchMask(X,P,K,h,w, R_noise)
+            mask, ellipses = getSearchMask(X,P,h,w, R_noise)
 
             kps, des =  findKeypoints(frame, mask)
             matchMask = np.array([[ellipse(kps[i].pt[0], kps[i].pt[1], **ellipses[j]) <= 0.01 for j in range(N)] for i in range(len(kps))], dtype=np.uint8)
@@ -337,22 +352,22 @@ if __name__ == "__main__":
 
             idx = np.array([m.trainIdx for m in bestMatches])
             z = np.array([kps[m.queryIdx].pt for m in bestMatches])
-            X, P = measurementUpdate(z, idx,X, P, K, R_noise)
+            X, P = measurementUpdate(z, idx,X, P, R_noise)
 
 
             image = cv2.drawMatches(frame,kps,baseFrame,markers,bestMatches, image)
             uncertainties = drawEllipses(image, ellipses)
 
 
-            img = get3dImage(X,K,canvas, fig)
-            image = np.vstack([image, np.hstack([img,\
-                 15*np.ones((img.shape[0], image.shape[1]-img.shape[1],3), dtype=np.uint8)])])
+            # img = get3dImage(X,canvas, fig)
+            # image = np.vstack([image, np.hstack([img,\
+            #      15*np.ones((img.shape[0], image.shape[1]-img.shape[1],3), dtype=np.uint8)])])
 
             cv2.imshow( "Frame", image)
-
-            frames.append([X[13:].reshape(-1,3).T,\
-                np.block([[Rot.from_quat([X[4],X[5],X[6],X[3]]).as_matrix(),\
-                     X[:3,None]], [0,0,0,1]]), K])
+            # frames.append([X[16:].reshape(-1,3).T,\
+            #     np.block([[Rot.from_quat([X[4],X[5],X[6],X[3]]).as_matrix(),\
+            #          X[:3,None]], [0,0,0,1]]), np.array([[X[13], 0, X[14]], [0, X[13], X[15]],
+            #       [0, 0, 1]])])
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         else:
@@ -366,10 +381,10 @@ if __name__ == "__main__":
     # fig = plt.figure()
 
     # lookfrom = np.array([[0,0,-15]])
-    # print(X[13:].reshape(-1,3))
+    # print(X[16:].reshape(-1,3))
     # ani = animation.FuncAnimation(fig, lambda x: draw_model_and_query_pose(*x,\
     #      point_size=50,
-    #     #  lookfrom=lookfrom, lookat=np.mean(X[13:].reshape(-1,3), 0),
+    #     #  lookfrom=lookfrom, lookat=np.mean(X[16:].reshape(-1,3), 0),
     #      lookfrom=np.linalg.inv(x[1])[:3,-1]-x[1][2,:3]*10 -x[1][1,:3]*2,
     #      lookat=np.linalg.inv(x[1])[:3,-1] + x[1][2,:3]*5,
     #      ), frames, interval = 30)
