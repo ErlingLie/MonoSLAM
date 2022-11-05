@@ -130,9 +130,9 @@ def priorUpdate(X: np.ndarray,P:np.ndarray, Q: np.ndarray, dt):
     dwu = np.block([[np.zeros((3,3)), np.eye(3)]])
 
     Fu = np.vstack([dru, dthetau, dvu, dwu])
-    P1 = P[:12,:12]
-    Pp = Fx@P1@Fx.T + Fu@Q@Fu.T
-    P[:12,:12] = Pp
+    P[:12,:12] = Fx@P[:12,:12]@Fx.T + Fu@Q@Fu.T
+    P[:12,12:] = Fx@P[:12,12:]
+    P[12:,:12] = P[:12,12:].T
     X[0:3] = rp
     X[3:7] = qp
     return X, P
